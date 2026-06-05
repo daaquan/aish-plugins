@@ -8,8 +8,15 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 fn main() {
-    if let Err(e) = run() {
-        // Errors go to the result frame; this is a last resort.
+    let mut host = Host::new();
+    if let Err(e) = run(&mut host) {
+        // Report a clean protocol failure so the host surfaces a plugin error
+        // instead of treating the exit as an unexpected crash (EOF before result).
+        let _ = host.send(&Frame::Result {
+            id: 1,
+            ok: false,
+            payload: serde_json::json!({"exit": 1, "error": e}),
+        });
         eprintln!("commit plugin error: {e}");
         std::process::exit(1);
     }
@@ -48,6 +55,9 @@ impl Host {
         self.next_id += 1;
         self.send(&Frame::Request { id, op: op.to_string(), payload })?;
         match self.read_frame()? {
+            Frame::Response { id: rid, .. } if rid != id => {
+                Err(format!("response id {rid} does not match request id {id}"))
+            }
             Frame::Response { ok: true, payload: Some(p), .. } => Ok(p),
             Frame::Response { ok: false, error, .. } => {
                 Err(error.map(|e| format!("{}: {}", e.code, e.message)).unwrap_or_else(|| "service error".into()))
@@ -57,9 +67,7 @@ impl Host {
     }
 }
 
-fn run() -> Result<(), String> {
-    let mut host = Host::new();
-
+fn run(host: &mut Host) -> Result<(), String> {
     let (cwd, args, config) = match host.read_frame()? {
         Frame::Invoke { cwd, args, config, .. } => (PathBuf::from(cwd), args, config),
         other => return Err(format!("expected invoke, got {other:?}")),
@@ -74,7 +82,7 @@ fn run() -> Result<(), String> {
     let diff = git::staged_diff(&cwd)?;
     if diff.trim().is_empty() {
         tty_print("Nothing staged. Run `git add` first.\n");
-        return finish(&mut host, 0);
+        return finish(host, 0);
     }
 
     let messages = message::build_messages(&style, &language, &diff);
@@ -111,7 +119,7 @@ fn run() -> Result<(), String> {
         "decision": decision,
     }));
 
-    finish(&mut host, 0)
+    finish(host, 0)
 }
 
 fn finish(host: &mut Host, exit: i64) -> Result<(), String> {
