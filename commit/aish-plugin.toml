@@ -1,0 +1,9 @@
+name = "commit"
+version = "0.1.0"
+abi = "1"
+description = "AI commit message from the staged diff"
+subcommands = ["commit"]
+
+[permissions]
+model = true
+audit = true
