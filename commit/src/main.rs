@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+mod editor;
 mod git;
 mod message;
 mod protocol;
@@ -100,13 +101,34 @@ fn run(host: &mut Host) -> Result<(), String> {
 
     tty_print(&format!("\nSuggested commit:\n\n{msg}\n\n"));
 
-    let decision = if apply || tty_confirm("Accept? [Y/n] ") {
+    let decision = if apply {
         git::commit(&cwd, &msg, signoff)?;
         tty_print("Committed.\n");
         "applied"
     } else {
-        tty_print("Aborted.\n");
-        "rejected"
+        // Loop so the editor can be re-opened until accepted or aborted.
+        let mut msg = msg;
+        loop {
+            match tty_choice("Accept? [Y/n/e(dit)] ") {
+                Choice::Accept => {
+                    git::commit(&cwd, &msg, signoff)?;
+                    tty_print("Committed.\n");
+                    break "applied";
+                }
+                Choice::Edit => {
+                    msg = editor::edit(&msg)?;
+                    if msg.is_empty() {
+                        tty_print("Empty message; aborting.\n");
+                        break "rejected";
+                    }
+                    tty_print(&format!("\nEdited commit:\n\n{msg}\n\n"));
+                }
+                Choice::Reject => {
+                    tty_print("Aborted.\n");
+                    break "rejected";
+                }
+            }
+        }
     };
 
     let usage = resp.get("usage").cloned().unwrap_or_else(|| serde_json::json!({}));
@@ -133,14 +155,22 @@ fn tty_print(s: &str) {
     }
 }
 
-/// Prompt on /dev/tty. Returns true on Y/empty. Non-interactive (no tty) = false.
-fn tty_confirm(prompt: &str) -> bool {
+/// The user's answer to the commit prompt.
+enum Choice {
+    Accept,
+    Reject,
+    Edit,
+}
+
+/// Prompt on /dev/tty. Y/empty = Accept, e = Edit, anything else = Reject.
+/// Non-interactive (no tty) = Reject, matching the old built-in's safe default.
+fn tty_choice(prompt: &str) -> Choice {
     use std::io::{BufRead, BufReader};
     let Ok(tty_w) = std::fs::OpenOptions::new().write(true).open("/dev/tty") else {
-        return false;
+        return Choice::Reject;
     };
     let Ok(tty_r) = std::fs::OpenOptions::new().read(true).open("/dev/tty") else {
-        return false;
+        return Choice::Reject;
     };
     {
         let mut w = tty_w;
@@ -149,8 +179,33 @@ fn tty_confirm(prompt: &str) -> bool {
     }
     let mut line = String::new();
     if BufReader::new(tty_r).read_line(&mut line).unwrap_or(0) == 0 {
-        return false;
+        return Choice::Reject;
     }
-    let a = line.trim().to_lowercase();
-    a.is_empty() || a == "y" || a == "yes"
+    parse_choice(&line)
+}
+
+/// Map a raw prompt line to a [`Choice`]. Split out so the decision logic is
+/// testable without a tty.
+fn parse_choice(line: &str) -> Choice {
+    match line.trim().to_lowercase().as_str() {
+        "" | "y" | "yes" => Choice::Accept,
+        "e" | "edit" => Choice::Edit,
+        _ => Choice::Reject,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_choice, Choice};
+
+    #[test]
+    fn parse_choice_maps_answers() {
+        assert!(matches!(parse_choice(""), Choice::Accept));
+        assert!(matches!(parse_choice(" Y \n"), Choice::Accept));
+        assert!(matches!(parse_choice("yes"), Choice::Accept));
+        assert!(matches!(parse_choice("e"), Choice::Edit));
+        assert!(matches!(parse_choice("EDIT"), Choice::Edit));
+        assert!(matches!(parse_choice("n"), Choice::Reject));
+        assert!(matches!(parse_choice("whatever"), Choice::Reject));
+    }
 }
